@@ -1,0 +1,228 @@
+worker_processes ${NGINX_WORKERS};
+user nobody nobody;
+error_log /dev/stderr warn;
+error_log /var/log/nginx/error.log warn;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /usr/local/openresty/nginx/conf/mime.types;
+    default_type  application/octet-stream;
+
+    log_format main '$remote_addr - [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent cache=$sent_http_x_cache_status';
+    access_log /dev/stdout main;
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    keepalive_timeout 65;
+
+    # Extract real client IP from Caddy's X-Forwarded-For (Docker bridge network)
+    set_real_ip_from 172.16.0.0/12;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    limit_req_zone $binary_remote_addr zone=immich_limit:10m rate=${RATE_LIMIT}r/s;
+    limit_req_zone $binary_remote_addr zone=immich_static:10m rate=100r/s;
+    limit_req_zone $binary_remote_addr zone=immich_auth:10m rate=10r/m;
+    limit_req_status 429;
+
+    resolver 127.0.0.11 valid=30s ipv6=off;
+
+    proxy_cache_path ${CACHE_DIR}/nginx_meta
+        levels=1:2
+        keys_zone=immich_meta:1m
+        max_size=50m
+        inactive=24h
+        use_temp_path=off;
+
+    lua_shared_dict immich_version 1m;
+
+    upstream immich_backend {
+        server ${IMMICH_BACKEND};
+        keepalive 32;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        location = /_validate {
+            internal;
+            set $auth_upstream http://auth:${AUTH_PORT};
+            proxy_pass $auth_upstream/validate;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header x-api-key $http_x_api_key;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header Cookie $http_cookie;
+            proxy_set_header X-Original-URI $request_uri;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 5s;
+        }
+
+        # Thumbnails — serve from rclone-synced static files
+        # content_by_lua_block runs after auth_request_set resolves $user_id and
+        # picks thumbnail.webp or preview.jpeg first depending on ?size=
+        location ~* "${CACHE_PATTERN_THUMBS}" {
+            auth_request /_validate;
+            auth_request_set $user_id $upstream_http_x_user_id;
+
+            set $asset_id $1;
+
+            content_by_lua_block {
+                local id  = ngx.var.asset_id
+                local uid = ngx.var.user_id
+                local aa  = string.sub(id, 1, 2)
+                local bb  = string.sub(id, 3, 4)
+                local base = "${CACHE_DIR}/${IMMICH_THUMBS_PATH}/" .. uid .. "/" .. aa .. "/" .. bb .. "/" .. id
+
+                local order
+                if ngx.var.arg_size == "preview" then
+                    order = { base.."-preview.jpeg", base.."_preview.jpeg",
+                              base.."-thumbnail.webp", base.."_thumbnail.webp" }
+                else
+                    order = { base.."-thumbnail.webp", base.."_thumbnail.webp",
+                              base.."-preview.jpeg",  base.."_preview.jpeg" }
+                end
+
+                for _, path in ipairs(order) do
+                    local f = io.open(path, "rb")
+                    if f then
+                        local data = f:read("*a")
+                        f:close()
+                        ngx.header["Content-Type"]   = path:match("%.jpe?g$") and "image/jpeg" or "image/webp"
+                        ngx.header["Content-Length"] = #data
+                        ngx.header["X-Cache-Status"] = "STATIC"
+                        ngx.print(data)
+                        return
+                    end
+                end
+
+                ngx.exec("@upstream")
+            }
+        }
+
+        # Encoded video — serve from rclone-synced static files
+        location ~* "${CACHE_PATTERN_VIDEOS}" {
+            auth_request /_validate;
+            auth_request_set $user_id $upstream_http_x_user_id;
+
+            set $asset_id $1;
+            set_by_lua_block $aa {
+                local id = ngx.var.asset_id
+                return string.sub(id, 1, 2)
+            }
+            set_by_lua_block $bb {
+                local id = ngx.var.asset_id
+                return string.sub(id, 3, 4)
+            }
+
+            root ${CACHE_DIR};
+            try_files /${IMMICH_ENCODED_PATH}/$user_id/$aa/$bb/$asset_id.mp4
+                      @upstream;
+
+            add_header X-Cache-Status "STATIC" always;
+        }
+
+        location @upstream {
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            add_header X-Cache-Status "UPSTREAM" always;
+        }
+
+        location /_app/ {
+            limit_req zone=immich_static burst=200 nodelay;
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
+
+        location ~* ^/(manifest\.json|custom\.css|service-worker\.js|favicon-[0-9]+\.png|apple-icon-[0-9]+\.png)$ {
+            proxy_cache immich_meta;
+            proxy_cache_key "$uri";
+            proxy_cache_valid 200 24h;
+            proxy_ignore_headers Cache-Control Expires;
+            proxy_cache_use_stale error timeout http_502 http_503 http_504;
+            add_header X-Cache-Status $upstream_cache_status always;
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
+
+        location = /api/server/version {
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            body_filter_by_lua_block {
+                local chunk, eof = ngx.arg[1], ngx.arg[2]
+                ngx.ctx.resp = (ngx.ctx.resp or "") .. (chunk or "")
+                if not eof then return end
+                local body = ngx.ctx.resp
+                local dict = ngx.shared.immich_version
+                local prev = dict:get("v") or ""
+                if prev ~= "" and prev ~= body then
+                    ngx.log(ngx.WARN, "immich-edge: server version changed, evicting meta cache")
+                    os.execute("find ${CACHE_DIR}/nginx_meta -type f -delete 2>/dev/null")
+                end
+                dict:set("v", body)
+            }
+        }
+
+        location ~* ^/api/server/(features|config|about|media-types)$ {
+            proxy_cache immich_meta;
+            proxy_cache_key "$uri";
+            proxy_cache_valid 200 5m;
+            proxy_ignore_headers Cache-Control Expires;
+            proxy_cache_use_stale error timeout http_502 http_503 http_504;
+            add_header X-Cache-Status $upstream_cache_status always;
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
+
+        location ~* ^/api/(auth/login|shared-links/login) {
+            limit_req zone=immich_auth burst=5 nodelay;
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
+
+        location / {
+            limit_req zone=immich_limit burst=200 nodelay;
+            proxy_pass http://immich_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            client_max_body_size 0;
+            proxy_request_buffering off;
+        }
+    }
+}
