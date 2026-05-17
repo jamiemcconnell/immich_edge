@@ -90,7 +90,7 @@ backfill_if_space() {
 }
 
 rclone_base() {
-  rclone --config /etc/immich-edge/rclone.conf --transfers "$TRANSFERS" --checksum "$@"
+  rclone --config /etc/immich-edge/rclone.conf --transfers "$TRANSFERS" --checksum --progress "$@"
 }
 
 # ─── determine sync mode ──────────────────────────────────────────────────────
@@ -128,9 +128,10 @@ sync_path() {
   local dst="${DEST}/${sub}"
 
   if [ "$do_full_sync" = "1" ]; then
-    # Full sync: newest first so eviction (if needed after) keeps recent files.
+    # Full sync: no --order-by (would require stat-ing every remote file before
+    # starting; unnecessary since existing files are skipped by size comparison).
     echo "immich-edge sync: full sync $sub"
-    rclone_base sync --order-by "modtime,descending" "$src" "$dst"
+    rclone_base sync --progress "$src" "$dst"
   else
     # Incremental: --max-age limits transfers to files newer than last sync.
     # rclone sync still deletes local files removed from remote (deletions work

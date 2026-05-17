@@ -63,6 +63,16 @@ Auth OK → Nginx content_by_lua reads file from disk → serve (cache=STATIC)
               proxy_pass to Immich → serve (cache=UPSTREAM)
 ```
 
+**Sync behaviour with `CACHE_MAX_SIZE`:**
+
+Each sync run:
+1. Pre-evict oldest files to make room for new ones
+2. Incremental sync (`rclone sync --max-age Xs`) — downloads only files added to Immich since the last run; handles remote deletions; old evicted files (mtime before last sync) are not re-downloaded
+3. Post-evict if new files pushed over limit
+4. Backfill — if headroom remains, fill it with the newest missing files (`rclone copy --order-by modtime,descending --max-transfer {available}`)
+
+Once per `FULL_SYNC_INTERVAL` (default 24h) a full sync runs instead of incremental, which cleans up deletions of old files that the `--max-age` window would otherwise skip.
+
 ### Auth service detail
 
 The auth service (`auth/`) is a small Go HTTP server with two endpoints:
@@ -151,6 +161,7 @@ docker compose logs -f
 | `RCLONE_IMMICH_PATH` | static only | — | Path to Immich data dir on remote |
 | `RCLONE_SYNC_INTERVAL` | static only | `60` | Sync interval in seconds (`0` = one-time seed) |
 | `RCLONE_TRANSFERS` | static only | `8` | Parallel rclone transfers |
+| `FULL_SYNC_INTERVAL` | static only | `86400` | How often (seconds) to run a full sync; catches deletions of old files that the incremental window misses |
 
 ## Static mode setup
 
