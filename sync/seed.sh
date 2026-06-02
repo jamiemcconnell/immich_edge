@@ -5,6 +5,9 @@ REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE is required}"
 BASE="${RCLONE_IMMICH_PATH:?RCLONE_IMMICH_PATH is required}"
 DEST="${CACHE_DIR:-/var/cache/immich-edge}"
 TRANSFERS="${RCLONE_TRANSFERS:-8}"
+CHECKERS="${RCLONE_CHECKERS:-16}"
+CHECKSUM="${RCLONE_CHECKSUM:-false}"
+PROGRESS="${RCLONE_PROGRESS:-false}"
 
 STAMP_FILE="$DEST/.last_sync"
 FULL_SYNC_STAMP="$DEST/.last_full_sync"
@@ -42,7 +45,7 @@ evict_to_limit() {
 
   tmpfile=$(mktemp)
   find "$dir" -type f ! -name '.last_sync' ! -name '.last_full_sync' \
-    | while IFS= read -r f; do stat -c "%Y %s %n" "$f" 2>/dev/null || true; done \
+    -exec stat -c "%Y %s %n" {} + 2>/dev/null \
     | sort -n > "$tmpfile"
 
   while IFS= read -r line; do
@@ -90,7 +93,11 @@ backfill_if_space() {
 }
 
 rclone_base() {
-  rclone --config /etc/immich-edge/rclone.conf --transfers "$TRANSFERS" --checksum --progress "$@"
+  extra_flags=""
+  [ "$CHECKSUM" = "true" ] && extra_flags="$extra_flags --checksum"
+  [ "$PROGRESS" = "true" ] && extra_flags="$extra_flags --progress"
+  # shellcheck disable=SC2086
+  rclone --config /etc/immich-edge/rclone.conf --transfers "$TRANSFERS" --checkers "$CHECKERS" $extra_flags "$@"
 }
 
 # ─── determine sync mode ──────────────────────────────────────────────────────
@@ -131,7 +138,7 @@ sync_path() {
     # Full sync: no --order-by (would require stat-ing every remote file before
     # starting; unnecessary since existing files are skipped by size comparison).
     echo "immich-edge sync: full sync $sub"
-    rclone_base sync --progress "$src" "$dst"
+    rclone_base sync "$src" "$dst"
   else
     # Incremental: --max-age limits transfers to files newer than last sync.
     # rclone sync still deletes local files removed from remote (deletions work

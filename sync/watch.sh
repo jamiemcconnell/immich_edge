@@ -15,5 +15,10 @@ echo "immich-edge sync: continuous sync every ${INTERVAL}s"
 while true; do
   sleep "$INTERVAL"
   echo "immich-edge sync: running sync at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  /seed.sh || echo "sync error, will retry next interval"
+  if /seed.sh; then
+    :
+  else
+    rc=$?
+    echo "immich-edge sync: sync failed (exit $rc), will retry next interval"
+  fi
 done

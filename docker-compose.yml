@@ -1,32 +1,11 @@
 services:
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    environment:
-      - EDGE_DOMAIN
-      - SSL_EMAIL
-    depends_on:
-      nginx:
-        condition: service_started
-
   nginx:
     build: ./nginx
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    ports:
+      - "${NGINX_BIND_ADDRESS:-127.0.0.1}:${NGINX_PORT:-2284}:80"
     volumes:
       - cache:/var/cache/immich-edge
       - /var/log/immich-edge/nginx:/var/log/nginx
@@ -35,7 +14,10 @@ services:
       - CACHE_MODE
       - CACHE_MAX_SIZE
       - CACHE_TTL
-      - RATE_LIMIT
+      - RATE_LIMIT=${RATE_LIMIT:-20}
+      - TRUSTED_PROXIES
+      - CACHE_MIN_USES=${CACHE_MIN_USES:-1}
+      - CACHE_BACKGROUND_UPDATE=${CACHE_BACKGROUND_UPDATE:-on}
       - CACHE_DIR=/var/cache/immich-edge
       - CACHE_TTL_404=${CACHE_TTL_404:-1m}
       - CACHE_PATTERN_THUMBS=${CACHE_PATTERN_THUMBS:-^/api/assets/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/thumbnail}
@@ -87,6 +69,9 @@ services:
       - CACHE_MAX_SIZE
       - FULL_SYNC_INTERVAL=${FULL_SYNC_INTERVAL:-86400}
       - RCLONE_TRANSFERS=${RCLONE_TRANSFERS:-8}
+      - RCLONE_CHECKERS=${RCLONE_CHECKERS:-16}
+      - RCLONE_CHECKSUM=${RCLONE_CHECKSUM:-false}
+      - RCLONE_PROGRESS=${RCLONE_PROGRESS:-false}
       - IMMICH_THUMBS_PATH=${IMMICH_THUMBS_PATH:-thumbs}
       - IMMICH_ENCODED_PATH=${IMMICH_ENCODED_PATH:-encoded-video}
       - IMMICH_PROFILE_PATH=${IMMICH_PROFILE_PATH:-profile}
@@ -95,5 +80,3 @@ services:
 
 volumes:
   cache:
-  caddy_data:
-  caddy_config:

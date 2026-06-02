@@ -10,8 +10,8 @@ Your photos stay at home. The VPS only caches frequently-accessed files.
 External user
       ↓
 VPS (immich-edge)
-├── Caddy   — SSL termination (Let's Encrypt), HSTS/CSP headers, reverse proxy to Nginx
-├── Nginx   — authentication gate + cache/static file server (OpenResty)
+├── Pangolin proxy (external) — SSL termination + edge policy
+├── Nginx   — authentication gate + cache/static file server (OpenResty, this repo)
 ├── Auth    — Go service: validates sessions, API keys, and shared links
 └── Sync    — rclone daemon syncing thumbs/videos from home server (static mode only)
       ↓  (Tailscale / WireGuard tunnel)
@@ -24,15 +24,15 @@ Home server
 Every asset request (thumbnail or video) goes through the same auth gate regardless of how the user is authenticated:
 
 ```
-Request → Caddy → Nginx
-                    ├── /_validate (internal auth_request to Auth service)
-                    │     ├── Session cookie / API key   → GET /api/users/me
-                    │     └── Shared link ?key=          → GET /api/shared-links/me
-                    │           (cookies forwarded — covers password-protected links)
-                    │           then: verify UUID is in the shared album
-                    │
-                    ├── Auth OK → serve from cache/static files
-                    └── Auth fail → 401 (no asset served)
+Request → Pangolin → Nginx
+                       ├── /_validate (internal auth_request to Auth service)
+                       │     ├── Session cookie / API key   → GET /api/users/me
+                       │     └── Shared link ?key=          → GET /api/shared-links/me
+                       │           (cookies forwarded — covers password-protected links)
+                       │           then: verify UUID is in the shared album
+                       │
+                       ├── Auth OK → serve from cache/static files
+                       └── Auth fail → 401 (no asset served)
 ```
 
 ### Cache modes
@@ -111,14 +111,15 @@ When the Immich server version changes, the meta cache (`nginx_meta`) is automat
 
 ## Prerequisites
 
-1. A VPS with ports 80 and 443 open
-2. DNS: your `EDGE_DOMAIN` A record pointing to the VPS IP
+1. A Pangolin proxy in front of this stack (handles SSL termination)
+2. A VPS where Pangolin can reach this stack over HTTP
 3. A VPN tunnel (Tailscale or WireGuard) between VPS and home server
 4. Docker and Docker Compose installed on the VPS
 5. `IMMICH_INTERNAL_URL` reachable from the VPS:
    ```sh
    curl http://<tailscale-ip>:2283/api/server/ping
    ```
+6. Pangolin upstream configured to `http://<vps-ip-or-localhost>:<NGINX_PORT>` and forwarding `X-Forwarded-For`/`X-Forwarded-Proto`
 
 ## Quick start
 
@@ -129,6 +130,8 @@ cp .env.example .env
 nano .env   # fill in required values
 docker compose up -d
 ```
+
+By default nginx is published on `127.0.0.1:2284` (`NGINX_BIND_ADDRESS`/`NGINX_PORT`) so it is only reachable locally; point Pangolin at that address/port or adjust as needed.
 
 Check logs:
 
@@ -141,13 +144,16 @@ docker compose logs -f
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IMMICH_INTERNAL_URL` | Yes | — | Immich URL reachable from VPS (e.g. `http://100.x.x.x:2283`) |
-| `EDGE_DOMAIN` | Yes | — | Public domain for this cache (e.g. `photos.example.com`) |
-| `SSL_EMAIL` | Yes | — | Let's Encrypt notification email |
+| `TRUSTED_PROXIES` | Yes | — | Comma-separated CIDRs/IPs trusted for `X-Forwarded-For` (Pangolin address space) |
 | `CACHE_MODE` | No | `proxy` | `proxy` or `static` |
 | `CACHE_MAX_SIZE` | No | `50g` | Max disk for nginx proxy cache |
 | `CACHE_TTL` | No | `365d` | TTL for cached thumbnails/videos |
 | `CACHE_TTL_404` | No | `1m` | TTL for 404 responses |
 | `RATE_LIMIT` | No | `20` | Requests/sec per IP for general endpoints |
+| `NGINX_BIND_ADDRESS` | No | `127.0.0.1` | Host address bound for nginx published port |
+| `NGINX_PORT` | No | `2284` | Host port mapped to nginx container port 80 |
+| `CACHE_MIN_USES` | No | `1` | Minimum requests before storing in nginx proxy cache |
+| `CACHE_BACKGROUND_UPDATE` | No | `on` | Enable background refresh for stale cached responses (`on`/`off`) |
 | `AUTH_PORT` | No | `8088` | Internal port for auth service |
 | `AUTH_TIMEOUT` | No | `5` | Auth service HTTP timeout in seconds |
 | `AUTH_CACHE_TTL` | No | `10s` | How long to cache auth results per credential (Go duration, e.g. `30s`, `5m`). Set to `0` to disable. |
@@ -161,6 +167,9 @@ docker compose logs -f
 | `RCLONE_IMMICH_PATH` | static only | — | Path to Immich data dir on remote |
 | `RCLONE_SYNC_INTERVAL` | static only | `60` | Sync interval in seconds (`0` = one-time seed) |
 | `RCLONE_TRANSFERS` | static only | `8` | Parallel rclone transfers |
+| `RCLONE_CHECKERS` | static only | `16` | rclone checkers concurrency for listing/check operations |
+| `RCLONE_CHECKSUM` | static only | `false` | `true` for strict checksum comparisons (more CPU/IO), `false` for faster size+mtime checks |
+| `RCLONE_PROGRESS` | static only | `false` | `true` to emit rclone progress lines in logs |
 | `FULL_SYNC_INTERVAL` | static only | `86400` | How often (seconds) to run a full sync; catches deletions of old files that the incremental window misses |
 
 ## Static mode setup
@@ -212,7 +221,7 @@ Query strings (including shared link `?key=` params) are not logged.
 
 **Brute-force protection on login** — `POST /api/auth/login` and `POST /api/shared-links/login` share a dedicated rate-limit zone: 10 requests/minute per IP, burst 5. Thumbnail and video requests are not subject to this limit.
 
-**HSTS + CSP** — Caddy applies `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, and a `Content-Security-Policy` header to all responses.
+**Edge security headers** — SSL termination and edge headers are enforced by Pangolin in front of this stack.
 
 **Minimal privilege** — Nginx runs as `nobody`; auth service runs as `appuser` (uid 1001); all containers have `no-new-privileges: true`.
 

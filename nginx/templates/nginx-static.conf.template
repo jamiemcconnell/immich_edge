@@ -19,10 +19,16 @@ http {
     sendfile on;
     keepalive_timeout 65;
 
-    # Extract real client IP from Caddy's X-Forwarded-For (Docker bridge network)
-    set_real_ip_from 172.16.0.0/12;
+    # Trust only upstream proxy CIDRs/IPs passed via TRUSTED_PROXIES.
+    ${TRUSTED_PROXIES_NGINX}
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
+
+    # Preserve upstream TLS context from Pangolin when forwarding to Immich.
+    map $http_x_forwarded_proto $forwarded_proto {
+        default $http_x_forwarded_proto;
+        "" $scheme;
+    }
 
     limit_req_zone $binary_remote_addr zone=immich_limit:10m rate=${RATE_LIMIT}r/s;
     limit_req_zone $binary_remote_addr zone=immich_static:10m rate=100r/s;
@@ -153,6 +159,8 @@ http {
             proxy_cache_valid 200 24h;
             proxy_ignore_headers Cache-Control Expires;
             proxy_cache_use_stale error timeout http_502 http_503 http_504;
+            proxy_cache_background_update ${CACHE_BACKGROUND_UPDATE};
+            proxy_cache_revalidate on;
             add_header X-Cache-Status $upstream_cache_status always;
             proxy_pass http://immich_backend;
             proxy_set_header Host $host;
@@ -177,8 +185,17 @@ http {
                 local dict = ngx.shared.immich_version
                 local prev = dict:get("v") or ""
                 if prev ~= "" and prev ~= body then
-                    ngx.log(ngx.WARN, "immich-edge: server version changed, evicting meta cache")
-                    os.execute("find ${CACHE_DIR}/nginx_meta -type f -delete 2>/dev/null")
+                    ngx.log(ngx.WARN, "immich-edge: server version changed, scheduling meta cache eviction")
+                    local cache_dir = "${CACHE_DIR}"
+                    local ok, err = ngx.timer.at(0, function()
+                        local rc = os.execute("find " .. cache_dir .. "/nginx_meta -type f -delete")
+                        if rc ~= 0 and rc ~= true then
+                            ngx.log(ngx.ERR, "immich-edge: meta cache eviction failed, rc=", tostring(rc))
+                        end
+                    end)
+                    if not ok then
+                        ngx.log(ngx.ERR, "immich-edge: failed to schedule meta cache eviction: ", err)
+                    end
                 end
                 dict:set("v", body)
             }
@@ -190,6 +207,8 @@ http {
             proxy_cache_valid 200 5m;
             proxy_ignore_headers Cache-Control Expires;
             proxy_cache_use_stale error timeout http_502 http_503 http_504;
+            proxy_cache_background_update ${CACHE_BACKGROUND_UPDATE};
+            proxy_cache_revalidate on;
             add_header X-Cache-Status $upstream_cache_status always;
             proxy_pass http://immich_backend;
             proxy_set_header Host $host;
@@ -215,7 +234,7 @@ http {
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Proto $forwarded_proto;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";

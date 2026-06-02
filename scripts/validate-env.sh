@@ -15,13 +15,18 @@ require_var() {
 }
 
 require_var IMMICH_INTERNAL_URL
-require_var EDGE_DOMAIN
-require_var SSL_EMAIL
+require_var TRUSTED_PROXIES
 
 # Validate CACHE_MODE
 CACHE_MODE="${CACHE_MODE:-proxy}"
 if [ "$CACHE_MODE" != "proxy" ] && [ "$CACHE_MODE" != "static" ]; then
   echo "ERROR: CACHE_MODE must be 'proxy' or 'static', got: $CACHE_MODE" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
+RATE_LIMIT="${RATE_LIMIT:-20}"
+if ! echo "$RATE_LIMIT" | grep -Eq '^[0-9]+$'; then
+  echo "ERROR: RATE_LIMIT must be a positive integer, got: $RATE_LIMIT" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -33,6 +38,20 @@ if [ "$CACHE_MODE" = "static" ]; then
   RCLONE_CONFIG="${RCLONE_CONFIG:-/etc/immich-edge/rclone.conf}"
   if [ ! -f "$RCLONE_CONFIG" ]; then
     echo "ERROR: rclone config not found at $RCLONE_CONFIG" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  # Validate trusted proxies values (CIDRs/IPs, comma-separated)
+  FOUND_PROXY=0
+  for proxy in $(echo "$TRUSTED_PROXIES" | tr ',' ' '); do
+    FOUND_PROXY=1
+    if ! echo "$proxy" | grep -Eq '^[0-9a-fA-F:.]+(/[0-9]{1,3})?$'; then
+      echo "ERROR: TRUSTED_PROXIES entry is invalid: $proxy" >&2
+      ERRORS=$((ERRORS + 1))
+    fi
+  done
+  if [ "$FOUND_PROXY" -eq 0 ]; then
+    echo "ERROR: TRUSTED_PROXIES must include at least one CIDR/IP entry" >&2
     ERRORS=$((ERRORS + 1))
   fi
 fi
