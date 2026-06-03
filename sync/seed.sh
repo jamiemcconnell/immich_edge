@@ -1,19 +1,8 @@
 #!/bin/sh
 set -e
 
-REMOTE="${RCLONE_REMOTE:?RCLONE_REMOTE is required}"
-BASE="${RCLONE_IMMICH_PATH:?RCLONE_IMMICH_PATH is required}"
+SOURCE="${RSYNC_SOURCE:?RSYNC_SOURCE is required}"
 DEST="${CACHE_DIR:-/var/cache/immich-edge}"
-TRANSFERS="${RCLONE_TRANSFERS:-8}"
-CHECKERS="${RCLONE_CHECKERS:-16}"
-CHECKSUM="${RCLONE_CHECKSUM:-false}"
-PROGRESS="${RCLONE_PROGRESS:-false}"
-
-STAMP_FILE="$DEST/.last_sync"
-FULL_SYNC_STAMP="$DEST/.last_full_sync"
-# How often to run a full sync (catches deletions of old files that the
-# incremental --max-age window misses). Default: 24h.
-FULL_SYNC_INTERVAL="${FULL_SYNC_INTERVAL:-86400}"
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -44,8 +33,7 @@ evict_to_limit() {
   echo "immich-edge sync: cache $(( used / 1048576 ))MB > limit $(( limit_bytes / 1048576 ))MB — freeing $(( need_free / 1048576 ))MB"
 
   tmpfile=$(mktemp)
-  find "$dir" -type f ! -name '.last_sync' ! -name '.last_full_sync' \
-    -exec stat -c "%Y %s %n" {} + 2>/dev/null \
+  find "$dir" -type f -exec stat -c "%Y %s %n" {} + 2>/dev/null \
     | sort -n > "$tmpfile"
 
   while IFS= read -r line; do
@@ -62,91 +50,26 @@ evict_to_limit() {
   echo "immich-edge sync: cache after eviction: $(( $(dir_bytes "$dir") / 1048576 ))MB / $(( limit_bytes / 1048576 ))MB"
 }
 
-# Fill remaining space (limit - current) by downloading the newest missing
-# files from remote. Runs per sub-path, rechecking budget after each.
-backfill_if_space() {
-  local limit_bytes="$1"
-  local used available
-
-  used=$(dir_bytes "$DEST")
-  [ "$used" -ge "$limit_bytes" ] && return 0
-
-  echo "immich-edge sync: $(( (limit_bytes - used) / 1048576 ))MB free — backfilling newest missing files"
-
-  for sub in \
-      "${IMMICH_THUMBS_PATH:-thumbs}" \
-      "${IMMICH_ENCODED_PATH:-encoded-video}" \
-      "${IMMICH_PROFILE_PATH:-profile}"; do
-
-    used=$(dir_bytes "$DEST")
-    available=$(( limit_bytes - used ))
-    [ "$available" -le 0 ] && break
-
-    echo "  backfilling $sub (budget $(( available / 1048576 ))MB)"
-    rclone_base copy \
-      --order-by "modtime,descending" \
-      --max-transfer "${available}" \
-      "${REMOTE}:${BASE}/${sub}" "${DEST}/${sub}" || true
-  done
-
-  echo "immich-edge sync: cache after backfill: $(( $(dir_bytes "$DEST") / 1048576 ))MB / $(( limit_bytes / 1048576 ))MB"
-}
-
-rclone_base() {
-  extra_flags=""
-  [ "$CHECKSUM" = "true" ] && extra_flags="$extra_flags --checksum"
-  [ "$PROGRESS" = "true" ] && extra_flags="$extra_flags --progress"
-  # shellcheck disable=SC2086
-  rclone --config /etc/immich-edge/rclone.conf --transfers "$TRANSFERS" --checkers "$CHECKERS" $extra_flags "$@"
-}
-
-# ─── determine sync mode ──────────────────────────────────────────────────────
-
-now=$(date +%s)
-do_full_sync=0
-
-if [ ! -f "$STAMP_FILE" ]; then
-  echo "immich-edge sync: first run — full sync"
-  do_full_sync=1
-elif [ ! -f "$FULL_SYNC_STAMP" ]; then
-  echo "immich-edge sync: no full-sync record — running full sync"
-  do_full_sync=1
-else
-  last_full=$(cat "$FULL_SYNC_STAMP")
-  if [ $(( now - last_full )) -ge "$FULL_SYNC_INTERVAL" ]; then
-    echo "immich-edge sync: full sync interval elapsed — running full sync"
-    do_full_sync=1
+rsync_base() {
+  if [ -n "${RSYNC_FLAGS:-}" ]; then
+    # shellcheck disable=SC2086
+    rsync $RSYNC_FLAGS "$@"
+  else
+    rsync -a --delete --stats --human-readable --timeout=30 --contimeout=10 "$@"
   fi
-fi
-
-# Incremental: max_age covers files newer than last sync + 5m buffer for
-# thumbnails that Immich finished generating just after the previous run.
-max_age=""
-if [ "$do_full_sync" = "0" ] && [ -f "$STAMP_FILE" ]; then
-  last=$(cat "$STAMP_FILE")
-  max_age=$(( now - last + 300 ))
-fi
+}
 
 # ─── sync ─────────────────────────────────────────────────────────────────────
 
 sync_path() {
   local sub="$1"
-  local src="${REMOTE}:${BASE}/${sub}"
-  local dst="${DEST}/${sub}"
-
-  if [ "$do_full_sync" = "1" ]; then
-    # Full sync: no --order-by (would require stat-ing every remote file before
-    # starting; unnecessary since existing files are skipped by size comparison).
-    echo "immich-edge sync: full sync $sub"
-    rclone_base sync "$src" "$dst"
-  else
-    # Incremental: --max-age limits transfers to files newer than last sync.
-    # rclone sync still deletes local files removed from remote (deletions work
-    # regardless of --max-age). Old evicted files (mtime before last sync) are
-    # not re-downloaded.
-    echo "immich-edge sync: incremental sync $sub (max-age ${max_age}s)"
-    rclone_base sync --max-age "${max_age}s" "$src" "$dst"
-  fi
+  local src="${SOURCE%/}/${sub}/"
+  local dst="${DEST}/${sub}/"
+  mkdir -p "$dst"
+  echo "immich-edge sync: starting rsync for ${sub} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "immich-edge sync: source=${src} dest=${dst}"
+  rsync_base "$src" "$dst"
+  echo "immich-edge sync: completed rsync for ${sub} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 if [ -n "${CACHE_MAX_SIZE:-}" ]; then
@@ -162,13 +85,6 @@ sync_path "${IMMICH_PROFILE_PATH:-profile}"
 if [ -n "${CACHE_MAX_SIZE:-}" ]; then
   # Post-sync: new files may have pushed us over limit
   evict_to_limit "$limit" "$DEST"
-  # Backfill: if there is headroom, fill it with the newest missing files
-  backfill_if_space "$limit"
 fi
-
-# ─── update stamps ────────────────────────────────────────────────────────────
-
-echo "$now" > "$STAMP_FILE"
-[ "$do_full_sync" = "1" ] && echo "$now" > "$FULL_SYNC_STAMP"
 
 echo "immich-edge sync: seed complete"

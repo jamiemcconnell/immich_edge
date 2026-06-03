@@ -1,13 +1,13 @@
 #!/bin/sh
 set -e
 
-INTERVAL="${RCLONE_SYNC_INTERVAL:-60}"
+INTERVAL="${RSYNC_SYNC_INTERVAL:-60}"
 
 echo "immich-edge sync: running initial seed"
 /seed.sh
 
 if [ "$INTERVAL" = "0" ]; then
-  echo "immich-edge sync: RCLONE_SYNC_INTERVAL=0, one-time seed only, exiting"
+  echo "immich-edge sync: RSYNC_SYNC_INTERVAL=0, one-time seed only, exiting"
   exit 0
 fi
 

@@ -1,6 +1,6 @@
 FROM alpine:3.19
 
-RUN apk add --no-cache rclone
+RUN apk add --no-cache rsync
 
 COPY seed.sh /seed.sh
 COPY watch.sh /watch.sh

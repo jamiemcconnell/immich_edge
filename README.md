@@ -13,7 +13,7 @@ VPS (immich-edge)
 ├── Pangolin proxy (external) — SSL termination + edge policy
 ├── Nginx   — authentication gate + cache/static file server (OpenResty, this repo)
 ├── Auth    — Go service: validates sessions, API keys, and shared links
-└── Sync    — rclone daemon syncing thumbs/videos from home server (static mode only)
+└── Sync    — rsync daemon syncing thumbs/videos from home server (static mode only)
       ↓  (Tailscale / WireGuard tunnel)
 Home server
 └── Immich  — all your data stays here
@@ -49,7 +49,7 @@ Auth OK → proxy_cache HIT? → serve cached response
 
 #### static
 
-rclone syncs Immich's `thumbs/` and `encoded-video/` directories to the VPS on a configurable interval. Nginx serves them as static files — zero proxy overhead on cache hits.
+rsync syncs Immich's `thumbs/` and `encoded-video/` directories to the VPS on a configurable interval. Nginx serves them as static files — zero proxy overhead on cache hits.
 
 The auth service resolves the actual file path:
 1. Authenticate request → get `userId`
@@ -66,12 +66,9 @@ Auth OK → Nginx content_by_lua reads file from disk → serve (cache=STATIC)
 **Sync behaviour with `CACHE_MAX_SIZE`:**
 
 Each sync run:
-1. Pre-evict oldest files to make room for new ones
-2. Incremental sync (`rclone sync --max-age Xs`) — downloads only files added to Immich since the last run; handles remote deletions; old evicted files (mtime before last sync) are not re-downloaded
-3. Post-evict if new files pushed over limit
-4. Backfill — if headroom remains, fill it with the newest missing files (`rclone copy --order-by modtime,descending --max-transfer {available}`)
-
-Once per `FULL_SYNC_INTERVAL` (default 24h) a full sync runs instead of incremental, which cleans up deletions of old files that the `--max-age` window would otherwise skip.
+1. Pre-evict oldest files to make room for incoming files
+2. Run `rsync` for thumbs/videos/profile paths (with deletion support)
+3. Post-evict if synced files pushed over limit
 
 ### Auth service detail
 
@@ -128,10 +125,14 @@ git clone https://github.com/youruser/immich-edge
 cd immich-edge
 cp .env.example .env
 nano .env   # fill in required values
+docker login ghcr.io   # if your package is private
+docker compose pull
 docker compose up -d
 ```
 
 By default nginx is published on `127.0.0.1:2284` (`NGINX_BIND_ADDRESS`/`NGINX_PORT`) so it is only reachable locally; point Pangolin at that address/port or adjust as needed.
+
+`compose.yaml` pulls published images from GHCR. To pin a specific published version, set `IMAGE_TAG` in `.env` (for example `IMAGE_TAG=v1.2.3`). For local builds from source, use `docker compose -f docker-compose.yml up -d`.
 
 Check logs:
 
@@ -163,34 +164,26 @@ docker compose logs -f
 | `IMMICH_PROFILE_PATH` | No | `profile` | Relative path to profile images |
 | `CACHE_PATTERN_THUMBS` | No | `^/api/assets/([a-f0-9]{8}-…{12})/thumbnail` | Nginx regex for thumbnail URLs |
 | `CACHE_PATTERN_VIDEOS` | No | `^/api/assets/([a-f0-9]{8}-…{12})/video/playback` | Nginx regex for video URLs |
-| `RCLONE_REMOTE` | static only | — | rclone remote name |
-| `RCLONE_IMMICH_PATH` | static only | — | Path to Immich data dir on remote |
-| `RCLONE_SYNC_INTERVAL` | static only | `60` | Sync interval in seconds (`0` = one-time seed) |
-| `RCLONE_TRANSFERS` | static only | `8` | Parallel rclone transfers |
-| `RCLONE_CHECKERS` | static only | `16` | rclone checkers concurrency for listing/check operations |
-| `RCLONE_CHECKSUM` | static only | `false` | `true` for strict checksum comparisons (more CPU/IO), `false` for faster size+mtime checks |
-| `RCLONE_PROGRESS` | static only | `false` | `true` to emit rclone progress lines in logs |
-| `FULL_SYNC_INTERVAL` | static only | `86400` | How often (seconds) to run a full sync; catches deletions of old files that the incremental window misses |
+| `RSYNC_SOURCE` | static only | — | Base rsync source containing Immich `thumbs`, `encoded-video`, and `profile` directories |
+| `RSYNC_SYNC_INTERVAL` | static only | `60` | Sync interval in seconds (`0` = one-time seed) |
+| `RSYNC_FLAGS` | static only | empty | Extra rsync flags (default used when empty: `-a --delete --stats --human-readable --timeout=30 --contimeout=10`) |
+| `IMAGE_PREFIX` | No | `ghcr.io/jamiemcconnell/immich-edge` | Prefix for published images used by `compose.yaml` |
+| `IMAGE_TAG` | No | `latest` | Tag for published images used by `compose.yaml` |
 
 ## Static mode setup
 
 ```sh
-# 1. Configure rclone (SSH/SFTP or any rclone-supported remote)
-rclone config  # create remote pointing to your home server
-
-# 2. Test access
-rclone ls homeserver:/mnt/data/immich/thumbs | head
-
-# 3. Add to .env
+# 1. Add static sync settings to .env
 CACHE_MODE=static
-RCLONE_REMOTE=homeserver
-RCLONE_IMMICH_PATH=/mnt/data/immich
+RSYNC_SOURCE=rsync://100.64.1.10/immich
+# or: RSYNC_SOURCE=user@100.64.1.10:/mnt/data/immich
 
-# 4. Start with the sync service enabled
+# 2. Start with the sync service enabled
 COMPOSE_PROFILES=static docker compose up -d
 ```
 
-The `sync` container runs rclone on startup (seed) and then periodically thereafter. Files are placed in the Docker volume at `CACHE_DIR` (`/var/cache/immich-edge` inside containers).
+The `sync` container runs rsync on startup (seed) and then periodically thereafter. Files are placed in the Docker volume at `CACHE_DIR` (`/var/cache/immich-edge` inside containers).
+Use `docker compose logs -f sync` to watch sync start/end timestamps and rsync transfer stats.
 
 ## Verifying the cache
 

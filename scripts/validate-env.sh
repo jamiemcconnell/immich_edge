@@ -32,14 +32,7 @@ fi
 
 # Static mode extra requirements
 if [ "$CACHE_MODE" = "static" ]; then
-  require_var RCLONE_REMOTE
-  require_var RCLONE_IMMICH_PATH
-
-  RCLONE_CONFIG="${RCLONE_CONFIG:-/etc/immich-edge/rclone.conf}"
-  if [ ! -f "$RCLONE_CONFIG" ]; then
-    echo "ERROR: rclone config not found at $RCLONE_CONFIG" >&2
-    ERRORS=$((ERRORS + 1))
-  fi
+  require_var RSYNC_SOURCE
 
   # Validate trusted proxies values (CIDRs/IPs, comma-separated)
   FOUND_PROXY=0

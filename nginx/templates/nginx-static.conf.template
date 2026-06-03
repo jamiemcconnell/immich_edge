@@ -69,7 +69,7 @@ http {
             proxy_read_timeout 5s;
         }
 
-        # Thumbnails — serve from rclone-synced static files
+        # Thumbnails — serve from sync-synced static files
         # content_by_lua_block runs after auth_request_set resolves $user_id and
         # picks thumbnail.webp or preview.jpeg first depending on ?size=
         location ~* "${CACHE_PATTERN_THUMBS}" {
@@ -111,7 +111,7 @@ http {
             }
         }
 
-        # Encoded video — serve from rclone-synced static files
+        # Encoded video — serve from sync-synced static files
         location ~* "${CACHE_PATTERN_VIDEOS}" {
             auth_request /_validate;
             auth_request_set $user_id $upstream_http_x_user_id;
