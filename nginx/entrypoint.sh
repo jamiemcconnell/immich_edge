@@ -21,8 +21,26 @@ echo "immich-edge: starting nginx in $MODE mode"
 IMMICH_BACKEND=$(echo "${IMMICH_INTERNAL_URL}" | sed 's|^https\?://||' | sed 's|/.*||')
 export IMMICH_BACKEND
 
+TRUSTED_PROXIES="${TRUSTED_PROXIES:-}"
+if [ -z "$TRUSTED_PROXIES" ]; then
+  echo "ERROR: TRUSTED_PROXIES is required (comma-separated CIDRs/IPs for upstream proxies)" >&2
+  exit 1
+fi
+
+TRUSTED_PROXIES_NGINX=""
+for proxy in $(echo "$TRUSTED_PROXIES" | tr ',' ' '); do
+  [ -z "$proxy" ] && continue
+  TRUSTED_PROXIES_NGINX="${TRUSTED_PROXIES_NGINX}    set_real_ip_from ${proxy};
+"
+done
+if [ -z "$TRUSTED_PROXIES_NGINX" ]; then
+  echo "ERROR: TRUSTED_PROXIES did not contain any valid CIDR/IP entries" >&2
+  exit 1
+fi
+export TRUSTED_PROXIES_NGINX
+
 # Substitute only our env vars; nginx's $var references are left untouched
-envsubst '${IMMICH_INTERNAL_URL} ${IMMICH_BACKEND} ${CACHE_MODE} ${CACHE_MAX_SIZE} ${CACHE_TTL} ${CACHE_TTL_404} ${CACHE_DIR} ${CACHE_PATTERN_THUMBS} ${CACHE_PATTERN_VIDEOS} ${AUTH_PORT} ${NGINX_WORKERS} ${IMMICH_THUMBS_PATH} ${IMMICH_ENCODED_PATH} ${IMMICH_PROFILE_PATH} ${RATE_LIMIT}' \
+envsubst '${IMMICH_INTERNAL_URL} ${IMMICH_BACKEND} ${CACHE_MODE} ${CACHE_MAX_SIZE} ${CACHE_TTL} ${CACHE_TTL_404} ${CACHE_DIR} ${CACHE_PATTERN_THUMBS} ${CACHE_PATTERN_VIDEOS} ${AUTH_PORT} ${NGINX_WORKERS} ${IMMICH_THUMBS_PATH} ${IMMICH_ENCODED_PATH} ${IMMICH_PROFILE_PATH} ${RATE_LIMIT} ${TRUSTED_PROXIES_NGINX} ${CACHE_MIN_USES} ${CACHE_BACKGROUND_UPDATE}' \
   < "$TMPL" > "$CONF_OUT"
 
 # Allow nobody (worker processes) to write logs

@@ -12,10 +12,13 @@ parse_env() {
 }
 
 ENV_FILE="$SCRIPT_DIR/.env"
+EDGE_URL="${EDGE_URL:-$(parse_env EDGE_URL "$ENV_FILE")}"
 EDGE_DOMAIN="${EDGE_DOMAIN:-$(parse_env EDGE_DOMAIN "$ENV_FILE")}"
 IMMICH_INTERNAL_URL="${IMMICH_INTERNAL_URL:-$(parse_env IMMICH_INTERNAL_URL "$ENV_FILE")}"
 
-EDGE_URL="https://${EDGE_DOMAIN:?EDGE_DOMAIN not set (set in .env or export it)}"
+if [[ -z "$EDGE_URL" ]]; then
+  EDGE_URL="https://${EDGE_DOMAIN:?EDGE_URL not set (set EDGE_URL or EDGE_DOMAIN in .env/export)}"
+fi
 HOME_URL="${IMMICH_INTERNAL_URL:?IMMICH_INTERNAL_URL not set (set in .env or export it)}"
 
 # ─────────────────────────────────────────────────────────────────
