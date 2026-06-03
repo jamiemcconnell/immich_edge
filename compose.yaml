@@ -58,6 +58,7 @@ services:
   sync:
     image: "${IMAGE_PREFIX:-ghcr.io/jamiemcconnell/immich-edge}-sync:${IMAGE_TAG:-latest}"
     pull_policy: always
+    command: ["/watch.sh"]
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
